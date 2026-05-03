@@ -36,35 +36,37 @@ def _build_edge_index(num_nodes: int, edges: list) -> torch.Tensor:
 class _GATLayer(nn.Module):
     """
     Single-head Graph Attention layer (Veličković et al., ICLR 2018).
-    Operates on node features of one frame.
+    Operates on a batch of node-feature matrices.
     """
     def __init__(self, in_dim: int, out_dim: int, dropout: float = 0.1):
         super().__init__()
-        self.W   = nn.Linear(in_dim,  out_dim, bias=False)
-        self.att = nn.Linear(out_dim * 2, 1, bias=False)
-        self.act = nn.LeakyReLU(0.2)
+        self.W    = nn.Linear(in_dim,      out_dim, bias=False)
+        self.att  = nn.Linear(out_dim * 2, 1,       bias=False)
+        self.act  = nn.LeakyReLU(0.2)
         self.drop = nn.Dropout(dropout)
 
     def forward(self, h: torch.Tensor,
                 edge_index: torch.Tensor) -> torch.Tensor:
         """
-        h          : (V, in_dim)
+        h          : (B, V, in_dim)
         edge_index : (2, E)
-        Returns    : (V, out_dim)
+        Returns    : (B, V, out_dim)
         """
-        h  = self.W(h)                                   # (V, out_dim)
-        src, dst = edge_index[0], edge_index[1]
-        e  = torch.cat([h[src], h[dst]], dim=-1)         # (E, 2*out_dim)
-        a  = self.act(self.att(e)).squeeze(-1)           # (E,)
+        h = self.W(h)                                    # (B, V, out_dim)
+        B, V, D = h.shape
+        src, dst = edge_index[0], edge_index[1]          # (E,)
 
-        # Softmax over neighbours
-        V     = h.size(0)
-        alpha = torch.zeros(V, V, device=h.device)
-        alpha[src, dst] = a
-        alpha = torch.softmax(alpha, dim=-1)             # (V, V)
+        # Gather src/dst features for every edge across the whole batch
+        e = torch.cat([h[:, src, :], h[:, dst, :]], dim=-1)  # (B, E, 2*D)
+        a = self.act(self.att(e)).squeeze(-1)                 # (B, E)
+
+        # Build full (B, V, V) attention matrix then softmax over neighbours
+        alpha = torch.zeros(B, V, V, device=h.device)
+        alpha[:, src, dst] = a                           # (B, E) → (B, V, V)
+        alpha = torch.softmax(alpha, dim=-1)             # (B, V, V)
         alpha = self.drop(alpha)
 
-        return alpha @ h                                  # (V, out_dim)
+        return torch.bmm(alpha, h)                       # (B, V, out_dim)
 
 
 class _MultiHeadGAT(nn.Module):
